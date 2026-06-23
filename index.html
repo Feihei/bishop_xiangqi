@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>主教中国象棋 Bishop Xiangqi</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <div class="container">
+        <div class="header">
+            <h1>主教中国象棋 Bishop Xiangqi - <span id="gameModeText">人机对战</span></h1>
+            <div class="subtitle">象的走法同国际象棋（斜线任意格，不可越子，可过河）</div>
+            <div class="rules">白方先行 | 将死/困毙对方获胜 | 三次重复局面判和 | 其他规则同传统中国象棋</div>
+        </div>
+        <div class="game-board">
+            <div class="board" id="chessboard">
+                <!-- 棋盘通过JS生成 -->
+            </div>
+        </div>
+        <div class="controls">
+            <div class="status" id="gameStatus">
+                <h2>游戏状态</h2>
+                <div id="statusText">白方回合，请走棋</div>
+                <div class="player-turn">
+                    <div class="turn-indicator" id="turnIndicator" style="background: white;"></div>
+                    <span id="currentPlayer">白方回合</span>
+                </div>
+            </div>
+            
+            <button class="btn" id="restartBtn">重新开始</button>
+            <button class="btn" id="undoBtn">悔棋</button>
+            <button class="btn" id="modeBtn">切换为双人对战</button>
+            <!-- 添加难度选择 -->
+            <div class="special-rule">
+                <h3>AI难度选择</h3>
+                <div class="difficulty-buttons">
+                    <button class="btn difficulty-btn" id="easyBtn">简单</button>
+                    <button class="btn difficulty-btn active" id="mediumBtn">中等</button>
+                    <button class="btn difficulty-btn" id="hardBtn">困难</button>
+                </div>
+                <p style="margin-top: 10px; font-size: 0.8rem; color: #aaa;">
+                    难度越高，AI思考时间越长
+                </p>
+            </div>
+        </div>
+
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
