@@ -141,7 +141,7 @@ document.addEventListener('DOMContentLoaded', () => {
         clearMoveIndicators();
 
         // 如果是人机对战且AI先手，则触发AI移动
-        if (gameState.gameMode === 'pvc' && gameState.currentPlayer === 'black') {
+        if (gameState.gameMode === 'pvc' && !gameState.currentPlayer) {
             setTimeout(makeAIMove, 500);
         }
     }
@@ -780,7 +780,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const inCheck = isInCheck(gameState.currentPlayer);
         
                 if (inCheck) {
-                    statusText.innerHTML = `<span style="color:red;font-weight:bold;">${gameState.currentPlayer === 'white' ? '白方' : '黑方'}被将军！</span>`;
+                    statusText.innerHTML = `<span style="color:red;font-weight:bold;">${gameState.currentPlayer ? '白方' : '黑方'}被将军！</span>`;
                     currentPlayerText.textContent = `${gameState.currentPlayer ? '白方' : '黑方'}回合（将军）`;
                 } else {
                     statusText.textContent = `${gameState.currentPlayer ? '白方' : '黑方'}回合，请走棋`;
@@ -872,7 +872,7 @@ document.addEventListener('DOMContentLoaded', () => {
         
         statusText.textContent = `已设置为${getDifficultyName(difficulty)}难度`;
         setTimeout(() => {
-            if (!gameState.aiThinking && gameState.currentPlayer === 'black' && gameState.gameMode === 'pvc') {
+            if (!gameState.aiThinking && !gameState.currentPlayer && gameState.gameMode === 'pvc') {
                 statusText.textContent = '黑方回合，请走棋';
             }
         }, 1000);
@@ -883,29 +883,87 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // AI
 
-    // 评估棋子阶段性价值
-    function evaluatePieceStageValue(pieceType, row, isWhite) {
-        let stageValue = 0;
-        
-        switch(pieceType) {
-            case PIECE_TYPES.CANNON:
-                if (row >= 3 && row <= 6) stageValue = 0.5;
-                break;
-            case PIECE_TYPES.BISHOP:
-                const totalPieces = gameState.board.flat().filter(x => x !== null).length;
-                if (totalPieces < 20) stageValue = 0.5;
-                break;
-            case PIECE_TYPES.PAWN:
-                if ((isWhite && row <= 4) || (!isWhite && row >= 5)) {
-                    stageValue = 0.5;
-                }
-                break;
-        }
-        
-        return stageValue;
+    // ============ Zobrist 哈希基础设施 ============
+    // 用 BigInt 实现 64 位键。14 = 7 种棋子类型 × 2 种颜色。
+    // 棋子 [type, isWhite] 映射到索引 type * 2 + (isWhite ? 1 : 0)。
+    // 注意：键在 findBestMove 内部维护，搜索开始时从棋盘全量重算，
+    // 搜索结束后 currentZobristKey 不再被信任（避免污染 UI 路径）。
+    const ZOBRIST_PIECE_STATES = 14;
+    const zobristTable = Array.from({ length: 10 }, () =>
+        Array.from({ length: 9 }, () =>
+            Array.from({ length: ZOBRIST_PIECE_STATES }, () => {
+            // 64 位随机数（BigInt）。用两段 32 位拼装保证位宽。
+            // 注意：BigInt 不支持 >>> 无符号右移，用 0xFFFFFFFF 掩码截到 32 位非负值。
+            const lo = BigInt(Math.floor(Math.random() * 0x100000000)) & 0xFFFFFFFFn;
+            const hi = BigInt(Math.floor(Math.random() * 0x100000000)) & 0xFFFFFFFFn;
+                return (hi << 32n) | lo;
+            })
+        )
+    );
+    const zobristBlackToMove = ((BigInt(Math.floor(Math.random() * 0x100000000)) << 32n) |
+        BigInt(Math.floor(Math.random() * 0x100000000)));
+
+    // 棋子到 zobristTable 第三维索引的映射
+    function zobristPieceIndex(piece) {
+        // piece = [type, isWhite]
+        return piece[0] * 2 + (piece[1] ? 1 : 0);
     }
 
-    // 棋子位置价值表
+    // 当前搜索局面的 Zobrist 键（仅在 findBestMove 搜索期间有效）
+    let currentZobristKey = 0n;
+
+    // 从当前棋盘全量计算 Zobrist 键。
+    // isBlackToMove: 当前是否黑方走棋，决定是否纳入 zobristBlackToMove（默认 true）。
+    // 搜索根节点默认为黑方(AI)走，每次 makeAIMoveInternal 后轮次翻转。
+    function computeZobristKey(isBlackToMove = true) {
+        let key = 0n;
+        for (let row = 0; row < 10; row++) {
+            for (let col = 0; col < 9; col++) {
+                const piece = gameState.board[row][col];
+                if (piece) {
+                    key ^= zobristTable[row][col][zobristPieceIndex(piece)];
+                }
+            }
+        }
+        if (isBlackToMove) key ^= zobristBlackToMove;
+        return key;
+    }
+
+    // ============ Transposition Table（置换表） ============
+    const TT_EXACT = 0;       // 节点值是精确的（在 (alpha, beta) 之间）
+    const TT_LOWER_BOUND = 1; // 下界（来自 fail-high，即 value >= beta）
+    const TT_UPPER_BOUND = 2; // 上界（来自 fail-low，即 value <= alpha）
+    const TT_MAX_SIZE = 50000;
+    const transpositionTable = new Map();
+
+    function ttStore(key, depth, flag, value, bestMove) {
+        if (transpositionTable.size >= TT_MAX_SIZE) {
+            transpositionTable.clear();
+        }
+        transpositionTable.set(key, { depth, flag, value, bestMove });
+    }
+
+    function ttProbe(key) {
+        return transpositionTable.get(key);
+    }
+
+    function ttClear() {
+        transpositionTable.clear();
+    }
+
+    // ============ 杀手走法 + 历史启发 ============
+    // killerMoves[ply][2]：每个 ply 层最多记两个引发剪枝的非吃子走法。
+    // historyTable[fromIndex][toIndex]：累计历史得分，fromIndex/toIndex = row*9+col。
+    const MAX_SEARCH_PLY = 64;
+    let killerMoves = [];
+    let historyTable = null;
+
+    function initHeuristics() {
+        killerMoves = Array.from({ length: MAX_SEARCH_PLY }, () => [null, null]);
+        historyTable = Array.from({ length: 90 }, () => new Array(90).fill(0));
+    }
+
+    // ============ 评估：棋子位置价值表 ============
     const positionValues = {
         [PIECE_TYPES.PAWN]: [  // 兵/卒
             [0,  0,  0,  0,  0,  0,  0,  0,  0],
@@ -993,38 +1051,22 @@ document.addEventListener('DOMContentLoaded', () => {
         ]
     };
 
-    // 评估棋子位置价值
-    function evaluatePositionValues() {
-        let score = 0;
-        
-        for (let row = 0; row < 10; row++) {
-            for (let col = 0; col < 9; col++) {
-                const piece = gameState.board[row][col];
-                if (piece) {
-                    const [type, isWhite] = piece;
-                    const positionValue = positionValues[type][isWhite ? (9 - row) : row][col];
-                    score += isWhite ? -positionValue : positionValue;
-                }
-            }
-        }
-        
-        return score;
-    }
-
     // 棋子活动性评估
+    // 注意：这里用 getBasicMoves（不含 wouldBeInCheck 过滤），因为活动性只是启发式，
+    // 没必要做精确的合法性校验——后者会引入 O(N^4) 的 isSquareAttacked 全盘扫描，
+    // 让评估函数慢到不可用。基本走法数量作为活动性近似已经足够。
     function evaluateMobility() {
         let score = 0;
         const importantPieces = [PIECE_TYPES.ROOK, PIECE_TYPES.KNIGHT, PIECE_TYPES.CANNON, PIECE_TYPES.BISHOP];
-        
+
         for (let row = 0; row < 10; row++) {
             for (let col = 0; col < 9; col++) {
                 const piece = gameState.board[row][col];
                 if (piece) {
                     const [type, isWhite] = piece;
                     if (importantPieces.includes(type)) {
-                        const moves = getPossibleMoves(row, col, type, isWhite);
-                        const mobility = moves.length;
-                        score += isWhite ? -mobility : mobility;
+                        const moves = getBasicMoves(row, col, piece);
+                        score += isWhite ? -moves.length : moves.length;
                     }
                 }
             }
@@ -1032,88 +1074,156 @@ document.addEventListener('DOMContentLoaded', () => {
         return score;
     }
 
-    function minimax(depth, alpha, beta, isMaximizing, currentDepth) {
+    // 搜索超时哨兵：findBestMove 在超时时抛出，由根节点捕获
+    const SEARCH_TIMEOUT = Symbol('search_timeout');
+    let searchDeadline = 0;
+    let searchTimedOut = false;
+
+    function minimax(depth, alpha, beta, isMaximizing, ply) {
+        // 超时检查（下沉到内部节点，避免搜一半树）
+        if (Date.now() > searchDeadline) {
+            searchTimedOut = true;
+            throw SEARCH_TIMEOUT;
+        }
+
+        // 查置换表
+        const ttEntry = ttProbe(currentZobristKey);
+        let ttBestMove = null;
+        if (ttEntry) {
+            ttBestMove = ttEntry.bestMove;
+            // 命中且深度足够：按 flag 直接返回边界值
+            if (ttEntry.depth >= depth) {
+                if (ttEntry.flag === TT_EXACT) {
+                    return ttEntry.value;
+                } else if (ttEntry.flag === TT_LOWER_BOUND) {
+                    if (ttEntry.value > alpha) alpha = ttEntry.value;
+                } else if (ttEntry.flag === TT_UPPER_BOUND) {
+                    if (ttEntry.value < beta) beta = ttEntry.value;
+                }
+                if (alpha >= beta) {
+                    return ttEntry.value;
+                }
+            }
+        }
+
         if (depth === 0) {
-            return evaluateBoard();
+            // 叶子节点：返回当前局面的评估，sideToMove 为当前要走棋的一方
+            // isMaximizing=true ↔ AI(黑方,false) 走；isMaximizing=false ↔ 人(白方,true) 走
+            return evaluateBoard(!isMaximizing);
         }
 
         const isWhite = !isMaximizing;
-        let possibleMoves = getAllPossibleMoves(isWhite);
-        
-        // 如果没有合法移动，返回极值
+        let possibleMoves = getAllPossibleMoves(isWhite, {
+            ply,
+            ttBestMove,
+            killers: killerMoves[ply],
+            history: historyTable,
+            isMaximizing
+        });
+
+        // 如果没有合法移动，返回极值（被将死/困毙）
         if (possibleMoves.length === 0) {
             return isMaximizing ? -10000 : 10000;
         }
-        
+
+        const origAlpha = alpha;
+        let bestValue = isMaximizing ? -Infinity : Infinity;
+        let bestMove = null;
+
         if (isMaximizing) {
-            let maxEval = -Infinity;
             for (const move of possibleMoves) {
-                // 执行移动
                 const undo = makeAIMoveInternal(move);
-                
-                // 递归评估
-                const eval = minimax(depth - 1, alpha, beta, false, currentDepth + 1);
-                
-                // 撤销移动
-                undo();
-                
-                maxEval = Math.max(maxEval, eval);
-                alpha = Math.max(alpha, eval);
+                let eval;
+                try {
+                    eval = minimax(depth - 1, alpha, beta, false, ply + 1);
+                } finally {
+                    undo(); // 超时抛 SEARCH_TIMEOUT 时也保证棋盘/Zobrist 键还原
+                }
+
+                if (eval > bestValue) {
+                    bestValue = eval;
+                    bestMove = move;
+                }
+                if (eval > alpha) alpha = eval;
                 if (beta <= alpha) {
+                    // 剪枝：记录杀手走法与历史得分（仅对非吃子走法）
+                    if (!move.captured) {
+                        recordKillerAndHistory(move, ply);
+                    }
                     break; // Beta剪枝
                 }
             }
-            return maxEval;
         } else {
-            let minEval = Infinity;
             for (const move of possibleMoves) {
-                // 执行移动
                 const undo = makeAIMoveInternal(move);
-                
-                // 递归评估
-                const eval = minimax(depth - 1, alpha, beta, true, currentDepth + 1);
-                
-                // 撤销移动
-                undo();
-                
-                minEval = Math.min(minEval, eval);
-                beta = Math.min(beta, eval);
+                let eval;
+                try {
+                    eval = minimax(depth - 1, alpha, beta, true, ply + 1);
+                } finally {
+                    undo();
+                }
+
+                if (eval < bestValue) {
+                    bestValue = eval;
+                    bestMove = move;
+                }
+                if (eval < beta) beta = eval;
                 if (beta <= alpha) {
+                    if (!move.captured) {
+                        recordKillerAndHistory(move, ply);
+                    }
                     break; // Alpha剪枝
                 }
             }
-            return minEval;
         }
+
+        // 存置换表：根据相对 origAlpha/beta 判断 flag
+        let flag;
+        if (bestValue <= origAlpha) {
+            flag = TT_UPPER_BOUND; // fail-low
+        } else if (bestValue >= beta) {
+            flag = TT_LOWER_BOUND; // fail-high
+        } else {
+            flag = TT_EXACT;
+        }
+        ttStore(currentZobristKey, depth, flag, bestValue, bestMove);
+
+        return bestValue;
     }
 
-    // 添加移动排序函数
-    function sortMoves(moves) {
-        return moves.sort((a, b) => {
-            const captureA = gameState.board[a.toRow][a.toCol] !== null;
-            const captureB = gameState.board[b.toRow][b.toCol] !== null;
-            if (captureA !== captureB) return captureB - captureA;
-            
-            if (captureA && captureB) {
-                const valueA = pieceValues[gameState.board[a.toRow][a.toCol][0]];
-                const valueB = pieceValues[gameState.board[b.toRow][b.toCol][0]];
-                return valueB - valueA;
-            }
-            
-            return Math.random() - 0.5;
-        });
+    // 记录杀手走法（同一 ply 最多两个，不重复）与历史得分
+    function recordKillerAndHistory(move, ply) {
+        const slot = killerMoves[ply];
+        if (!slot) return;
+        // 与已有杀手走法都不相同才记录（去重）
+        const sameAs = (m) => m && m.fromRow === move.fromRow && m.fromCol === move.fromCol &&
+            m.toRow === move.toRow && m.toCol === move.toCol;
+        if (sameAs(slot[0])) return;
+        if (sameAs(slot[1])) {
+            // 命中第二槽，提升到第一槽
+            slot[1] = slot[0];
+            slot[0] = move;
+            return;
+        }
+        // 下移：新走法进第一槽，原第一槽降为第二槽
+        slot[1] = slot[0];
+        slot[0] = move;
+        // 历史得分：以深度加权累加，剪枝越靠上层得分越高
+        historyTable[move.fromRow * 9 + move.fromCol][move.toRow * 9 + move.toCol] += ply * ply;
     }
 
-    // 获取所有可能的移动
-    function getAllPossibleMoves(isWhite) {
+    // 获取所有可能的移动，并按启发式排序。
+    // heuristics（可选）: { ply, ttBestMove, killers, history, isMaximizing }
+    function getAllPossibleMoves(isWhite, heuristics) {
         const moves = [];
-        
+
         for (let row = 0; row < 10; row++) {
             for (let col = 0; col < 9; col++) {
                 const piece = gameState.board[row][col];
                 if (piece && piece[1] === isWhite) {
                     const type = piece[0];
                     const pieceMoves = getPossibleMoves(row, col, type, isWhite);
-                    
+
                     for (const [toRow, toCol] of pieceMoves) {
                         moves.push({
                             fromRow: row,
@@ -1128,112 +1238,183 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
         }
-        
-        // 简单启发式排序
-        moves.sort((a, b) => {
-            // 吃子优先
-            if (a.captured && !b.captured) return -1;
-            if (!a.captured && b.captured) return 1;
-            
-            // 按照棋子价值排序
-            const aValue = a.captured ? pieceValues[gameState.board[a.toRow][a.toCol][0]] : 0;
-            const bValue = b.captured ? pieceValues[gameState.board[b.toRow][b.toCol][0]] : 0;
-            
-            return bValue - aValue;
-        });
-        
+
+        // 为每个走法计算排序得分并写入 move.score
+        scoreMoves(moves, heuristics);
+        moves.sort((a, b) => b.score - a.score);
         return moves;
     }
 
-    // 评估棋盘状态
-    function evaluateBoard() {
-        // 基础分数
-        let score = evaluatePositionValues();
-        
-        // 活动性评估（降低计算频率）
-        if (Math.random() < 0.3) { // 只30%的情况下计算活动性
-            score += evaluateMobility() * 0.3;
+    // 计算每个走法的排序得分（写入 move.score），确定性的启发式：
+    //   TT best move (置顶) > 吃子 MVV-LVA > 杀手走法 > 历史得分
+    // MVV-LVA：被吃子价值越高、走子价值越低，越优先（用小棋子吃大棋子）。
+    function scoreMoves(moves, heuristics) {
+        const ttBest = heuristics && heuristics.ttBestMove;
+        const killers = heuristics && heuristics.killers; // [move|null, move|null]
+        const history = heuristics && heuristics.history;
+        const ply = heuristics ? heuristics.ply : 0;
+
+        for (const move of moves) {
+            let s = 0;
+
+            // 1) TT 最佳走法置顶（用大数保证排在最前）
+            if (ttBest && move.fromRow === ttBest.fromRow && move.fromCol === ttBest.fromCol &&
+                move.toRow === ttBest.toRow && move.toCol === ttBest.toCol) {
+                s += 1000000;
+            }
+
+            // 2) 吃子走法：MVV-LVA。被吃子价值放大 10 倍减去走子价值。
+            if (move.captured) {
+                const victim = gameState.board[move.toRow][move.toCol][0];
+                const attacker = move.type;
+                s += 10000 + pieceValues[victim] * 10 - pieceValues[attacker];
+            }
+
+            // 3) 杀手走法（仅非吃子，因为吃子已由 MVV-LVA 覆盖）
+            if (!move.captured && killers) {
+                for (let i = 0; i < killers.length; i++) {
+                    const k = killers[i];
+                    if (k && k.fromRow === move.fromRow && k.fromCol === move.fromCol &&
+                        k.toRow === move.toRow && k.toCol === move.toCol) {
+                        // 第一槽权重高于第二槽
+                        s += i === 0 ? 9000 : 8000;
+                        break;
+                    }
+                }
+            }
+
+            // 4) 历史得分（仅非吃子）
+            if (!move.captured && history) {
+                s += Math.min(history[move.fromRow * 9 + move.fromCol][move.toRow * 9 + move.toCol], 8000);
+            }
+
+            move.score = s;
         }
-        
-        // 棋子数量评估
-        let materialCount = 0;
+    }
+
+    // 评估棋盘状态（确定性的——这是 TT 生效的前提，绝不能引入随机性）
+    // sideToMove: 当前要走棋的一方（true=白方/人，false=黑方/AI），用于正确计算将军加成
+    function evaluateBoard(sideToMove) {
+        let score = 0;
+
+        // 合并位置价值与子力评估为一次棋盘遍历（原先分两次遍历 90 格）
         for (let row = 0; row < 10; row++) {
             for (let col = 0; col < 9; col++) {
                 const piece = gameState.board[row][col];
                 if (piece) {
                     const [type, isWhite] = piece;
-                    materialCount += isWhite ? -pieceValues[type] : pieceValues[type];
+                    const positionValue = positionValues[type][isWhite ? (9 - row) : row][col];
+                    const material = pieceValues[type];
+                    // 正值=对黑方(AI)有利；白方取负
+                    score += isWhite ? -(positionValue + material) : (positionValue + material);
                 }
             }
         }
-        score += materialCount;
-        
-        // 检查是否被将军（加成）
-        const inCheck = isInCheck(!gameState.currentPlayer);
-        if (inCheck) {
-            score += gameState.currentPlayer ? 20 : -20;
+
+        // 活动性评估（确定性的，每次都算，但权重低）
+        score += evaluateMobility() * 0.3;
+
+        // 检查对方是否被将军（加成）
+        // score 为 AI（黑方）视角：白方被将军对 AI 有利(+20)，黑方被将军对 AI 不利(-20)
+        const opponent = !sideToMove;
+        if (isInCheck(opponent)) {
+            score += opponent ? 20 : -20;
         }
-        
+
         return score;
     }
 
     // 寻找最佳移动
     // 内部移动函数（不改UI）
     function makeAIMoveInternal(move) {
-        const piece = gameState.board[move.fromRow][move.fromCol];
-        const targetPiece = gameState.board[move.toRow][move.toCol];
-        
         // 保存原始状态
         const originalFromPiece = gameState.board[move.fromRow][move.fromCol];
         const originalToPiece = gameState.board[move.toRow][move.toCol];
-        
+
+        // 增量维护 Zobrist 键：本次走子要 XOR 的键之和（利用 XOR 自逆，undo 时再 XOR 同一个 delta 即可还原）
+        //   - XOR 掉 from 格的走子键
+        //   - XOR 掉 to 格被吃棋子的键（若有）
+        //   - XOR 上 to 格的走子键
+        //   - XOR 轮次键（轮到对手）
+        let keyDelta = zobristTable[move.fromRow][move.fromCol][zobristPieceIndex(originalFromPiece)];
+        if (originalToPiece) {
+            keyDelta ^= zobristTable[move.toRow][move.toCol][zobristPieceIndex(originalToPiece)];
+        }
+        keyDelta ^= zobristTable[move.toRow][move.toCol][zobristPieceIndex(originalFromPiece)];
+        keyDelta ^= zobristBlackToMove;
+
         // 执行移动
         gameState.board[move.fromRow][move.fromCol] = null;
-        gameState.board[move.toRow][move.toCol] = piece;
-        
-        // 返回一个撤销函数
+        gameState.board[move.toRow][move.toCol] = originalFromPiece;
+        currentZobristKey ^= keyDelta;
+
+        // 返回一个撤销函数：棋盘和键都通过同一个 keyDelta 还原
         return () => {
             // 恢复原始状态
             gameState.board[move.fromRow][move.fromCol] = originalFromPiece;
             gameState.board[move.toRow][move.toCol] = originalToPiece;
+            currentZobristKey ^= keyDelta;
         };
     }
 
     function findBestMove() {
         const startTime = Date.now();
         const maxTime = 5000; // 限制搜索时间为5秒
+        const maxDepth = gameState.aiDepths[gameState.aiDifficulty];
+
+        // 初始化搜索上下文：Zobrist 键全量重算（搜索期间有效，结束即弃用）、启发式表
+        currentZobristKey = computeZobristKey();
+        ttClear(); // 清掉上一回合的 TT 条目（跨回合不复用，但同一次 findBestMove 内的迭代加深复用）
+        initHeuristics();
+        searchDeadline = startTime + maxTime;
+        searchTimedOut = false;
+
         let depth = 1;
-        let bestMove = null;
-        
-        while (Date.now() - startTime < maxTime && depth <= gameState.aiDepths[gameState.aiDifficulty]) {
+        let bestMove = null; // 上一次完整搜完的最佳走法（兜底）
+
+        while (depth <= maxDepth) {
             let currentBestMove = null;
             let currentBestValue = -Infinity;
-            
-            const moves = getAllPossibleMoves(gameState.currentPlayer);
-            
-            for (const move of moves) {
-                // 使用内部移动函数
-                const undo = makeAIMoveInternal(move);
-                
-                // 递归评估
-                const value = minimax(depth - 1, -Infinity, Infinity, true, 0);
-                
-                // 撤销移动
-                undo();
-                
-                if (value > currentBestValue) {
-                    currentBestValue = value;
-                    currentBestMove = move;
+
+            try {
+                // 根节点走法也用启发式排序（TT bestMove 优先，便于深层搜索尽早命中）
+                const moves = getAllPossibleMoves(gameState.currentPlayer, {
+                    ply: 0,
+                    ttBestMove: bestMove, // 以上一轮迭代的最佳走法作为 PV
+                    killers: killerMoves[0],
+                    history: historyTable,
+                    isMaximizing: true
+                });
+
+                for (const move of moves) {
+                    const undo = makeAIMoveInternal(move);
+                    let value;
+                    try {
+                        // AI（黑方，最大化方）走完后轮到对手（白方，最小化方），故 isMaximizing=false
+                        value = minimax(depth - 1, -Infinity, Infinity, false, 1);
+                    } finally {
+                        undo(); // 超时抛 SEARCH_TIMEOUT 时也保证棋盘/Zobrist 键还原
+                    }
+
+                    if (value > currentBestValue) {
+                        currentBestValue = value;
+                        currentBestMove = move;
+                    }
                 }
+
+                // 本层完整搜完，更新 bestMove（跨迭代复用 TT 与 PV，不清表）
+                bestMove = currentBestMove;
+                depth++;
+                statusText.textContent = `AI思考中...深度 ${depth - 1}`;
+            } catch (e) {
+                if (e === SEARCH_TIMEOUT) {
+                    // 超时打断：保留上一层的完整结果，不采用本层半截结果
+                    break;
+                }
+                throw e; // 真实异常重新抛出
             }
-            
-            bestMove = currentBestMove;
-            depth++;
-            
-            // 更新状态显示
-            statusText.textContent = `AI思考中...深度 ${depth-1}`;
         }
-        
+
         return bestMove;
     }
 
@@ -1254,8 +1435,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         gameState.aiDifficulty === 'medium' ? 800 : 1200;
         
         setTimeout(() => {
-            const depth = gameState.aiDepths[gameState.aiDifficulty];
-            const bestMove = findBestMove(depth);
+            const bestMove = findBestMove();
             
             if (bestMove) {
                 // 使用新的数据结构执行移动
