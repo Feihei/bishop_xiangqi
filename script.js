@@ -14,7 +14,7 @@ document.addEventListener('DOMContentLoaded', () => {
         gameMode: 'pvc',
         aiThinking: false,
         aiDifficulty: 'medium',
-        aiDepths: { easy: 2, medium: 3, hard: 4 },
+        aiDepths: { easy: 2, medium: 4, hard: 6 }, // P4：搜索提速后上调（5 秒墙钟兜底）
     };
 
     // 棋子类型定义
@@ -314,157 +314,8 @@ document.addEventListener('DOMContentLoaded', () => {
         movePiece(gameState.selectedPiece.row, gameState.selectedPiece.col, row, col);
     }
     
-    // ============ canAttack 系列：轻量攻击检测 ============
-    // 判断 (r1,c1) 的 piece 能否攻击 (r2,c2)。
-    // 不生成走法数组，只做数学判断。与 getBasicMoves 逻辑完全一致。
-    // 用于 isSquareAttacked 替代 getBasicMoves + moves.some()，大幅减少内存分配。
-
-    // 辅助：检查 (r1,c1) 到 (r2,c2) 同行/列之间是否有阻挡
-    function isPathClear(r1, c1, r2, c2) {
-        if (r1 === r2) {
-            const minC = Math.min(c1, c2), maxC = Math.max(c1, c2);
-            for (let c = minC + 1; c < maxC; c++) {
-                if (gameState.board[r1][c]) return false;
-            }
-        } else {
-            const minR = Math.min(r1, r2), maxR = Math.max(r1, r2);
-            for (let r = minR + 1; r < maxR; r++) {
-                if (gameState.board[r][c1]) return false;
-            }
-        }
-        return true;
-    }
-
-    // 辅助：检查对角线路径 (r1,c1)→(r2,c2) 是否无阻挡
-    function isDiagonalClear(r1, c1, r2, c2) {
-        const dr = Math.sign(r2 - r1), dc = Math.sign(c2 - c1);
-        let r = r1 + dr, c = c1 + dc;
-        while (r !== r2 || c !== c2) {
-            if (gameState.board[r][c]) return false;
-            r += dr;
-            c += dc;
-        }
-        return true;
-    }
-
-    function canPieceAttack(r1, c1, piece, r2, c2) {
-        switch (piece[0]) {
-            case PIECE_TYPES.ROOK:
-                return canRookAttack(r1, c1, r2, c2);
-            case PIECE_TYPES.KNIGHT:
-                return canKnightAttack(r1, c1, r2, c2);
-            case PIECE_TYPES.CANNON:
-                return canCannonAttack(r1, c1, r2, c2);
-            case PIECE_TYPES.BISHOP:
-                return canBishopAttack(r1, c1, r2, c2);
-            case PIECE_TYPES.ADVISOR:
-                return canAdvisorAttack(r1, c1, piece[1], r2, c2);
-            case PIECE_TYPES.KING:
-                return canKingAttack(r1, c1, piece[1], r2, c2);
-            case PIECE_TYPES.PAWN:
-                return canPawnAttack(r1, c1, piece[1], r2, c2);
-            default:
-                return false;
-        }
-    }
-
-    // 车：同行或同列，中间无阻挡
-    function canRookAttack(r1, c1, r2, c2) {
-        if (r1 !== r2 && c1 !== c2) return false;
-        if (r1 === r2 && c1 === c2) return false;
-        return isPathClear(r1, c1, r2, c2);
-    }
-
-    // 马：L 型偏移（8个方向），检查蹩马腿（与 getBasicMoves 的 legRow/legCol 逻辑一致）
-    function canKnightAttack(r1, c1, r2, c2) {
-        const dr = r2 - r1, dc = c2 - c1;
-        const adr = Math.abs(dr), adc = Math.abs(dc);
-        // L 型：(2,1) 或 (1,2)
-        if (!((adr === 2 && adc === 1) || (adr === 1 && adc === 2))) return false;
-        // 蹩马腿位置：先走一步长的方向
-        const legRow = r1 + Math.sign(dr) * (adr > 1 ? 1 : 0);
-        const legCol = c1 + Math.sign(dc) * (adc > 1 ? 1 : 0);
-        return gameState.board[legRow][legCol] === null;
-    }
-
-    // 炮：同行或同列。不跳跃时不能吃子（只有空格走法），跳跃后只能吃子。
-    // isSquareAttacked 中目标格有棋子（王），所以只有跳跃后恰好落在目标格才算攻击。
-    // 即：中间恰好有 1 个棋子（炮架），中间无其他棋子。
-    function canCannonAttack(r1, c1, r2, c2) {
-        if (r1 !== r2 && c1 !== c2) return false;
-        if (r1 === r2 && c1 === c2) return false;
-        // 计算中间棋子数量
-        let count = 0;
-        if (r1 === r2) {
-            const minC = Math.min(c1, c2), maxC = Math.max(c1, c2);
-            for (let c = minC + 1; c < maxC; c++) {
-                if (gameState.board[r1][c]) count++;
-            }
-        } else {
-            const minR = Math.min(r1, r2), maxR = Math.max(r1, r2);
-            for (let r = minR + 1; r < maxR; r++) {
-                if (gameState.board[r][c1]) count++;
-            }
-        }
-        // 炮攻击需要恰好 1 个炮架（跳跃）
-        return count === 1;
-    }
-
-    // 象/相（国际象棋主教走法，对角线无距离限制，可过河）：同对角线，中间无阻挡
-    function canBishopAttack(r1, c1, r2, c2) {
-        const dr = r2 - r1, dc = c2 - c1;
-        if (Math.abs(dr) !== Math.abs(dc) || dr === 0) return false;
-        return isDiagonalClear(r1, c1, r2, c2);
-    }
-
-    // 士：斜线距离 1，且目标在九宫内
-    function canAdvisorAttack(r1, c1, isWhite, r2, c2) {
-        const dr = Math.abs(r2 - r1), dc = Math.abs(c2 - c1);
-        if (dr !== 1 || dc !== 1) return false;
-        // 目标必须在九宫范围内
-        if (r2 < 0 || r2 >= 10 || c2 < 3 || c2 > 5) return false;
-        if (isWhite && r2 < 7) return false;
-        if (!isWhite && r2 > 2) return false;
-        return true;
-    }
-
-    // 将帅：直线距离 1 + 目标在九宫内，或飞将（同列、中间无阻挡、对面是敌方王）
-    function canKingAttack(r1, c1, isWhite, r2, c2) {
-        // 普通走法：直线距离 1
-        const dr = Math.abs(r2 - r1), dc = Math.abs(c2 - c1);
-        if (dr + dc === 1) {
-            // 目标在九宫范围内
-            if (r2 < 0 || r2 >= 10 || c2 < 3 || c2 > 5) return false;
-            if (isWhite && r2 < 7) return false;
-            if (!isWhite && r2 > 2) return false;
-            return true;
-        }
-        // 飞将（将帅对脸）：同列、中间无阻挡
-        if (c1 === c2 && r1 !== r2) {
-            const target = gameState.board[r2][c2];
-            if (target && target[0] === PIECE_TYPES.KING && target[1] !== isWhite) {
-                return isPathClear(r1, c1, r2, c2);
-            }
-        }
-        return false;
-    }
-
-    // 兵/卒：前进 1 格，或过河后左右 1 格
-    function canPawnAttack(r1, c1, isWhite, r2, c2) {
-        const colDiff = c2 - c1;
-        if (isWhite) {
-            // 白方向上（dr=-1）
-            if (r2 === r1 - 1 && colDiff === 0) return true;
-            // 过河后左右
-            if (r1 <= 4 && r2 === r1 && Math.abs(colDiff) === 1) return true;
-        } else {
-            // 黑方向下（dr=+1）
-            if (r2 === r1 + 1 && colDiff === 0) return true;
-            // 过河后左右
-            if (r1 >= 5 && r2 === r1 && Math.abs(colDiff) === 1) return true;
-        }
-        return false;
-    }
+    // 攻击检测已并入下方 isSquareAttacked（P4：反向射线扫描，从目标格向外找攻击者，
+    // 替代 P2 的全盘扫描 + canPieceAttack 系列，速度提升数倍，是搜索深度的关键）。
 
     // 棋子基础移动规则
     function getBasicMoves(row, col, piece) {
@@ -801,21 +652,140 @@ document.addEventListener('DOMContentLoaded', () => {
         return true;
     }
     
-    // 检查某个位置是否被对方攻击
+    // ============ 反向射线攻击检测（P4） ============
+    // 检查某个位置是否被对方攻击。从目标格向外扫描射线找攻击者，
+    // 只探测约 30~40 个格子且大多为直接索引，替代旧版"90 格全盘扫描 × canPieceAttack"，
+    // 速度提升数倍。语义与旧版完全一致（由 test-engine.js 一致性测试保证）。
+    const ORTHO_DR = [-1, 1, 0, 0], ORTHO_DC = [0, 0, -1, 1];
+    const DIAG_DR = [-1, -1, 1, 1], DIAG_DC = [-1, 1, -1, 1];
+    const KNIGHT_DR = [-2, -2, -1, -1, 1, 1, 2, 2];
+    const KNIGHT_DC = [-1, 1, -2, 2, -2, 2, -1, 1];
+
     function isSquareAttacked(row, col, isWhite) {
-        
-        // 检查所有敌方棋子（用 canPieceAttack 替代 getBasicMoves + moves.some，避免生成走法数组）
-        for (let r = 0; r < 10; r++) {
-            for (let c = 0; c < 9; c++) {
-                const piece = gameState.board[r][c];
-                if (piece && piece[1] !== isWhite) {
-                    if (canPieceAttack(r, c, piece, row, col)) {
-                        return true;
+        const board = gameState.board;
+        const attWhite = !isWhite; // 攻击方颜色
+
+        // ---- 正交射线：车 / 炮 / 将（含飞将）----
+        // 射线上第 1 个棋子：车（直接攻击）或将（纵向=飞将规则，含相邻纵向）；
+        // 第 1 个棋子充当炮架，第 2 个棋子若是敌方炮则被攻击。
+        for (let dir = 0; dir < 4; dir++) {
+            const dr = ORTHO_DR[dir], dc = ORTHO_DC[dir];
+            let r = row + dr, c = col + dc;
+            let screenSeen = false;
+            while (r >= 0 && r < 10 && c >= 0 && c < 9) {
+                const piece = board[r][c];
+                if (piece) {
+                    const type = piece[0];
+                    if (!screenSeen) {
+                        if (piece[1] === attWhite) {
+                            if (type === PIECE_TYPES.ROOK) return true;
+                            // 飞将：纵向射线第 1 个棋子是敌方将帅。与旧版 canKingAttack 的
+                            // 飞将分支一致：只有当目标格确实是防守方的将帅时才构成攻击
+                            // （目标格为空/其他棋子时，相邻纵向由下方九宫分支覆盖）
+                            if (type === PIECE_TYPES.KING && dc === 0) {
+                                const targetPiece = board[row][col];
+                                if (targetPiece && targetPiece[0] === PIECE_TYPES.KING &&
+                                    targetPiece[1] === isWhite) {
+                                    return true;
+                                }
+                            }
+                        }
+                        screenSeen = true; // 炮架（无论敌我）
+                    } else {
+                        // 第 2 个棋子：只有敌方炮构成跳跃攻击，其后不可能再有攻击线
+                        if (piece[1] === attWhite && type === PIECE_TYPES.CANNON) return true;
+                        break;
                     }
+                }
+                r += dr;
+                c += dc;
+            }
+        }
+
+        // ---- 斜向射线：象（主教走法，第 1 个棋子若是敌方象则被攻击）----
+        for (let dir = 0; dir < 4; dir++) {
+            let r = row + DIAG_DR[dir], c = col + DIAG_DC[dir];
+            while (r >= 0 && r < 10 && c >= 0 && c < 9) {
+                const piece = board[r][c];
+                if (piece) {
+                    if (piece[1] === attWhite && piece[0] === PIECE_TYPES.BISHOP) return true;
+                    break;
+                }
+                r += DIAG_DR[dir];
+                c += DIAG_DC[dir];
+            }
+        }
+
+        // ---- 马：8 个反向马位 + 蹩马腿（腿在马位旁、朝目标长轴方向一步）----
+        for (let i = 0; i < 8; i++) {
+            const kr = row + KNIGHT_DR[i], kc = col + KNIGHT_DC[i];
+            if (kr < 0 || kr >= 10 || kc < 0 || kc >= 9) continue;
+            const piece = board[kr][kc];
+            if (!piece || piece[1] !== attWhite || piece[0] !== PIECE_TYPES.KNIGHT) continue;
+            const dr = row - kr, dc = col - kc;
+            const legRow = kr + Math.sign(dr) * (Math.abs(dr) > 1 ? 1 : 0);
+            const legCol = kc + Math.sign(dc) * (Math.abs(dc) > 1 ? 1 : 0);
+            if (board[legRow][legCol] === null) return true;
+        }
+
+        // ---- 士 / 将的贴身攻击：仅当目标格位于攻击方九宫半场（与旧版语义一致）----
+        // 防守方白 → 攻击方黑，目标须在黑方九宫（上，row<=2）；反之在白方九宫（下，row>=7）
+        const palaceTarget = col >= 3 && col <= 5 && (isWhite ? row <= 2 : row >= 7);
+        if (palaceTarget) {
+            // 士：斜向贴身
+            for (let i = 0; i < 4; i++) {
+                const r = row + DIAG_DR[i], c = col + DIAG_DC[i];
+                if (r < 0 || r >= 10) continue;
+                const piece = board[r][c];
+                if (piece && piece[1] === attWhite && piece[0] === PIECE_TYPES.ADVISOR) return true;
+            }
+            // 将：正交贴身（与旧版 canKingAttack 普通走法一致：目标在攻击方九宫半场即可，
+            // 不要求目标格有子；远距离纵向已在飞将分支覆盖）
+            for (let i = 0; i < 4; i++) {
+                const r = row + ORTHO_DR[i], c = col + ORTHO_DC[i];
+                if (r < 0 || r >= 10 || c < 0 || c >= 9) continue;
+                const piece = board[r][c];
+                if (piece && piece[1] === attWhite && piece[0] === PIECE_TYPES.KING) return true;
+            }
+        }
+
+        // ---- 兵/卒：攻击方正前方一格，或攻击方过河后的左右贴身 ----
+        if (attWhite) {
+            // 攻击方白（向上 -1）：兵在目标下一格
+            if (row + 1 < 10) {
+                const piece = board[row + 1][col];
+                if (piece && piece[1] === true && piece[0] === PIECE_TYPES.PAWN) return true;
+            }
+            // 白兵过河（row<=4）后可横击
+            if (row <= 4) {
+                if (col - 1 >= 0) {
+                    const piece = board[row][col - 1];
+                    if (piece && piece[1] === true && piece[0] === PIECE_TYPES.PAWN) return true;
+                }
+                if (col + 1 < 9) {
+                    const piece = board[row][col + 1];
+                    if (piece && piece[1] === true && piece[0] === PIECE_TYPES.PAWN) return true;
+                }
+            }
+        } else {
+            // 攻击方黑（向下 +1）：兵在目标上一格
+            if (row - 1 >= 0) {
+                const piece = board[row - 1][col];
+                if (piece && piece[1] === false && piece[0] === PIECE_TYPES.PAWN) return true;
+            }
+            // 黑卒过河（row>=5）后可横击
+            if (row >= 5) {
+                if (col - 1 >= 0) {
+                    const piece = board[row][col - 1];
+                    if (piece && piece[1] === false && piece[0] === PIECE_TYPES.PAWN) return true;
+                }
+                if (col + 1 < 9) {
+                    const piece = board[row][col + 1];
+                    if (piece && piece[1] === false && piece[0] === PIECE_TYPES.PAWN) return true;
                 }
             }
         }
-        
+
         return false;
     }
     
@@ -1120,19 +1090,26 @@ document.addEventListener('DOMContentLoaded', () => {
     // 搜索专用王位置缓存（仅在 findBestMove 搜索期间有效，消除 wouldBeInCheck/isInCheck 的全盘找王）
     let searchKingPos = { white: { row: 0, col: 0 }, black: { row: 0, col: 0 } };
 
-    // 从当前棋盘全量计算 Zobrist 键。
-    // isBlackToMove: 当前是否黑方走棋，决定是否纳入 zobristBlackToMove（默认 true）。
-    // 搜索根节点默认为黑方(AI)走，每次 makeAIMoveInternal 后轮次翻转。
-    function computeZobristKey(isBlackToMove = true) {
+    // 从任意棋盘快照全量计算 board-only Zobrist 键（不含轮次）。
+    // 用于重复局面检测（与游戏重复判和口径一致：只比较棋盘内容）。
+    function computeBoardKeyFromBoard(board) {
         let key = 0n;
         for (let row = 0; row < 10; row++) {
             for (let col = 0; col < 9; col++) {
-                const piece = gameState.board[row][col];
+                const piece = board[row][col];
                 if (piece) {
                     key ^= zobristTable[row][col][zobristPieceIndex(piece)];
                 }
             }
         }
+        return key;
+    }
+
+    // 从当前棋盘全量计算 Zobrist 键。
+    // isBlackToMove: 当前是否黑方走棋，决定是否纳入 zobristBlackToMove（默认 true）。
+    // 搜索根节点默认为黑方(AI)走，每次 makeAIMoveInternal 后轮次翻转。
+    function computeZobristKey(isBlackToMove = true) {
+        let key = computeBoardKeyFromBoard(gameState.board);
         if (isBlackToMove) key ^= zobristBlackToMove;
         return key;
     }
@@ -1141,12 +1118,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const TT_EXACT = 0;       // 节点值是精确的（在 (alpha, beta) 之间）
     const TT_LOWER_BOUND = 1; // 下界（来自 fail-high，即 value >= beta）
     const TT_UPPER_BOUND = 2; // 上界（来自 fail-low，即 value <= alpha）
-    const TT_MAX_SIZE = 50000;
+    const TT_MAX_SIZE = 200000; // P4：深层搜索（depth 6）节点量大，加大容量减少清表次数
     const transpositionTable = new Map();
 
-    function ttStore(key, depth, flag, value, bestMove) {
+    function ttStore(key, depth, flag, value, bestMove, ply) {
         if (transpositionTable.size >= TT_MAX_SIZE) {
             transpositionTable.clear();
+        }
+        // mate 分数换算为"距本节点"口径存入（值 + ply / -MATE 侧值 - ply），
+        // probe 时再按当前 ply 换算回去，保证同一局面在不同 ply 命中时 mate 距离正确
+        if (value > MATE_BOUND) {
+            value += ply;
+        } else if (value < -MATE_BOUND) {
+            value -= ply;
         }
         transpositionTable.set(key, { depth, flag, value, bestMove });
     }
@@ -1259,23 +1243,18 @@ document.addEventListener('DOMContentLoaded', () => {
         ]
     };
 
-    // 棋子活动性评估
-    // 注意：这里用 getBasicMoves（不含 wouldBeInCheck 过滤），因为活动性只是启发式，
-    // 没必要做精确的合法性校验——后者会引入 O(N^4) 的 isSquareAttacked 全盘扫描，
-    // 让评估函数慢到不可用。基本走法数量作为活动性近似已经足够。
-    function evaluateMobility() {
+    // 全量计算当前棋盘的静态分（子力 + 位置价值表，正分=对黑方/AI 有利）。
+    // 仅在 initSearchContext 时调用一次；搜索期间由 makeAIMoveInternal 增量维护。
+    function computeStaticScore(board) {
         let score = 0;
-        const importantPieces = [PIECE_TYPES.ROOK, PIECE_TYPES.KNIGHT, PIECE_TYPES.CANNON, PIECE_TYPES.BISHOP];
-
         for (let row = 0; row < 10; row++) {
             for (let col = 0; col < 9; col++) {
-                const piece = gameState.board[row][col];
+                const piece = board[row][col];
                 if (piece) {
                     const [type, isWhite] = piece;
-                    if (importantPieces.includes(type)) {
-                        const moves = getBasicMoves(row, col, piece);
-                        score += isWhite ? -moves.length : moves.length;
-                    }
+                    const positionValue = positionValues[type][isWhite ? (9 - row) : row][col];
+                    const material = pieceValues[type];
+                    score += isWhite ? -(positionValue + material) : (positionValue + material);
                 }
             }
         }
@@ -1285,120 +1264,286 @@ document.addEventListener('DOMContentLoaded', () => {
     // 搜索超时哨兵：findBestMove 在超时时抛出，由根节点捕获
     const SEARCH_TIMEOUT = Symbol('search_timeout');
     let searchDeadline = 0;
-    let searchTimedOut = false;
+
+    // 将死分数（P4）：MATE - ply，ply 越小分越高 → 优先进更快将死 / 更慢被将死
+    const MATE = 100000;
+    const MATE_BOUND = 90000;
+    // 静态搜索 delta 剪枝余量（约 6 个兵，覆盖位置价值表造成的评估摆动幅度）
+    const DELTA_MARGIN = 6;
+
+    // 搜索路径上的 board-only Zobrist 键栈（路径内重复检测）
+    const searchPathKeys = [];
+    // 对局历史中出现过的 board-only Zobrist 键（findBestMove 开始时全量重建）
+    let gameHistoryKeys = new Set();
+    // 当前局面的 board-only Zobrist 键（不含轮次——与游戏"三次重复局面判和"的
+    // 口径一致：游戏内重复计数只比较棋盘内容，不比较行棋方）
+    let currentBoardKey = 0n;
+    // 增量维护的静态分（子力 + 位置价值表，正分=对黑方/AI 有利）。
+    // 由 makeAIMoveInternal 在走子/撤销时增量更新，initSearchContext 时全量重算，
+    // 使 evaluateBoard 从 O(90) 全盘遍历降为 O(1)——静态搜索每叶子节点都要评估，
+    // 这是搜索速度的主要瓶颈。一致性由 test-engine.js 保证。
+    let searchScore = 0;
+    // 搜索统计（调试/测试用）
+    let searchStats = { nodes: 0, qnodes: 0, depth: 0, timeMs: 0, rootValue: 0 };
+
+    // 重复局面按和棋（0）估值：
+    //   - 搜索路径内重复 → 长将/长捉循环收敛为和棋，不再误判为优
+    //   - 对局历史重复 → AI 优势时避免走进三次重复判和；落后时把重复当和棋资源
+    function isRepetitionDraw(key) {
+        for (let i = searchPathKeys.length - 1; i >= 0; i--) {
+            if (searchPathKeys[i] === key) return true;
+        }
+        return gameHistoryKeys.has(key);
+    }
 
     function minimax(depth, alpha, beta, isMaximizing, ply) {
+        searchStats.nodes++;
         // 超时检查（下沉到内部节点，避免搜一半树）
         if (Date.now() > searchDeadline) {
-            searchTimedOut = true;
             throw SEARCH_TIMEOUT;
         }
 
-        // 查置换表
+        const isWhite = !isMaximizing;
+        // 当前走棋方的王位置 hint（搜索期间由 makeAIMoveInternal 增量维护）
+        const kingPosHint = isWhite ? searchKingPos.white : searchKingPos.black;
+
+        // 安全阀：将军延伸可能让 ply 超出启发式表范围，超限时静态返回
+        if (ply >= MAX_SEARCH_PLY) {
+            return evaluateBoard(!isMaximizing, searchKingPos);
+        }
+
+        // 重复局面按和棋处理。必须在查 TT 之前：同一局面在不同路径下的重复状态不同，
+        // TT 里的值可能来自"不构成重复"的路径
+        if (isRepetitionDraw(currentBoardKey)) {
+            return 0;
+        }
+
+        // 查置换表（mate 分数以"距本节点"口径存取，见 ttStore）
         const ttEntry = ttProbe(currentZobristKey);
         let ttBestMove = null;
         if (ttEntry) {
             ttBestMove = ttEntry.bestMove;
             // 命中且深度足够：按 flag 直接返回边界值
             if (ttEntry.depth >= depth) {
+                let ttValue = ttEntry.value;
+                if (ttValue > MATE_BOUND) ttValue -= ply;
+                else if (ttValue < -MATE_BOUND) ttValue += ply;
                 if (ttEntry.flag === TT_EXACT) {
-                    return ttEntry.value;
+                    return ttValue;
                 } else if (ttEntry.flag === TT_LOWER_BOUND) {
-                    if (ttEntry.value > alpha) alpha = ttEntry.value;
+                    if (ttValue > alpha) alpha = ttValue;
                 } else if (ttEntry.flag === TT_UPPER_BOUND) {
-                    if (ttEntry.value < beta) beta = ttEntry.value;
+                    if (ttValue < beta) beta = ttValue;
                 }
                 if (alpha >= beta) {
-                    return ttEntry.value;
+                    return ttValue;
                 }
             }
         }
 
-        if (depth === 0) {
-            // 叶子节点：返回当前局面的评估，sideToMove 为当前要走棋的一方
+        // 将军延伸（P4）：被将军时多搜一层，避免应将/长将战术被地平线效应吞掉
+        const inCheck = isInCheck(isWhite, kingPosHint);
+        if (inCheck && ply < MAX_SEARCH_PLY - 8) {
+            depth++;
+        }
+
+        if (depth <= 0) {
+            // 叶子节点：进入静态搜索（只延伸吃子/应将），消除地平线效应
             // isMaximizing=true ↔ AI(黑方,false) 走；isMaximizing=false ↔ 人(白方,true) 走
-            return evaluateBoard(!isMaximizing, searchKingPos);
+            return quiescence(alpha, beta, isMaximizing, ply, inCheck);
         }
 
-        const isWhite = !isMaximizing;
-        // 当前走棋方的王位置 hint（搜索期间由 makeAIMoveInternal 增量维护）
-        const kingPosHint = isWhite ? searchKingPos.white : searchKingPos.black;
-        let possibleMoves = getAllPossibleMoves(isWhite, {
-            ply,
-            ttBestMove,
-            killers: killerMoves[ply],
-            history: historyTable,
-            isMaximizing
-        }, kingPosHint);
+        searchPathKeys.push(currentBoardKey);
+        try {
+            // 伪合法生成 + 懒合法性验证（P4）：走完之后才检查己方王安全。
+            // 配合 alpha-beta 剪枝，绝大多数走法在合法性验证之前就被剪掉，
+            // 相比旧版"先生成全部合法走法再搜索"，每个节点省下几十次攻击检测。
+            const moves = getAllPseudoLegalMoves(isWhite, {
+                ply,
+                ttBestMove,
+                killers: killerMoves[ply],
+                history: historyTable,
+                isMaximizing
+            });
 
-        // 如果没有合法移动，返回极值（被将死/困毙）
-        if (possibleMoves.length === 0) {
-            return isMaximizing ? -10000 : 10000;
-        }
+            const origAlpha = alpha, origBeta = beta;
+            let bestValue = isMaximizing ? -Infinity : Infinity;
+            let bestMove = null;
+            let legalCount = 0;
 
-        const origAlpha = alpha;
-        let bestValue = isMaximizing ? -Infinity : Infinity;
-        let bestMove = null;
-
-        if (isMaximizing) {
-            for (const move of possibleMoves) {
+            for (const move of moves) {
                 const undo = makeAIMoveInternal(move);
+                // 懒合法性检查：走完后己方王被攻击则放弃该走法。
+                // searchKingPos 由 makeAIMoveInternal 增量维护（含走王的情况），总是与棋盘同步
+                if (isInCheck(isWhite, isWhite ? searchKingPos.white : searchKingPos.black)) {
+                    undo();
+                    continue;
+                }
+                legalCount++;
+
                 let eval;
                 try {
-                    eval = minimax(depth - 1, alpha, beta, false, ply + 1);
+                    eval = minimax(depth - 1, alpha, beta, !isMaximizing, ply + 1);
                 } finally {
                     undo(); // 超时抛 SEARCH_TIMEOUT 时也保证棋盘/Zobrist 键还原
                 }
 
-                if (eval > bestValue) {
-                    bestValue = eval;
-                    bestMove = move;
+                if (isMaximizing) {
+                    if (eval > bestValue) {
+                        bestValue = eval;
+                        bestMove = move;
+                    }
+                    if (eval > alpha) alpha = eval;
+                } else {
+                    if (eval < bestValue) {
+                        bestValue = eval;
+                        bestMove = move;
+                    }
+                    if (eval < beta) beta = eval;
                 }
-                if (eval > alpha) alpha = eval;
                 if (beta <= alpha) {
                     // 剪枝：记录杀手走法与历史得分（仅对非吃子走法）
                     if (!move.captured) {
                         recordKillerAndHistory(move, ply);
                     }
-                    break; // Beta剪枝
+                    break; // Beta/Alpha剪枝
                 }
             }
-        } else {
-            for (const move of possibleMoves) {
+
+            // 没有合法走法：将死/困毙（本游戏困毙同负）。mate 分数随 ply 递减
+            if (legalCount === 0) {
+                return isMaximizing ? -(MATE - ply) : (MATE - ply);
+            }
+
+            // 存置换表：根据相对 origAlpha/origBeta 判断 flag。
+            // （修复：旧版对 minimizer 用循环中已被修改的 beta 判断，
+            //   完整搜索时 bestValue === beta，会把 EXACT 误标为 LOWER_BOUND）
+            let flag;
+            if (bestValue <= origAlpha) {
+                flag = TT_UPPER_BOUND; // fail-low
+            } else if (bestValue >= origBeta) {
+                flag = TT_LOWER_BOUND; // fail-high
+            } else {
+                flag = TT_EXACT;
+            }
+            ttStore(currentZobristKey, depth, flag, bestValue, bestMove, ply);
+
+            return bestValue;
+        } finally {
+            searchPathKeys.pop();
+        }
+    }
+
+    // 静态搜索（Quiescence Search，P4）：
+    // 叶子节点不再直接返回静态评估，而是继续搜索所有吃子走法直到局面"安静"。
+    // 旧版会在最后一层吃子却看不见对手的回吃（地平线效应），造成严重战术盲区。
+    // 被将军时不能"站住不动"，改为全宽搜索所有应将走法（无合法走法 = 将死）。
+    function quiescence(alpha, beta, isMaximizing, ply, inCheck) {
+        searchStats.qnodes++;
+        if (Date.now() > searchDeadline) {
+            throw SEARCH_TIMEOUT;
+        }
+
+        const isWhite = !isMaximizing;
+
+        // 安全阀（应将链可能包含非吃子走法，靠重复检测与 ply 上限收敛）
+        if (ply >= MAX_SEARCH_PLY + 32) {
+            return evaluateBoard(!isMaximizing, searchKingPos);
+        }
+
+        // 重复局面按和棋处理（长将循环在此收敛）
+        if (isRepetitionDraw(currentBoardKey)) {
+            return 0;
+        }
+
+        searchPathKeys.push(currentBoardKey);
+        try {
+            if (inCheck) {
+                // 应将：全宽搜索（与 minimax 同构，但不记杀手/历史、不查 TT）
+                const moves = getAllPseudoLegalMoves(isWhite, null);
+                let bestValue = isMaximizing ? -Infinity : Infinity;
+                let legalCount = 0;
+
+                for (const move of moves) {
+                    const undo = makeAIMoveInternal(move);
+                    if (isInCheck(isWhite, isWhite ? searchKingPos.white : searchKingPos.black)) {
+                        undo();
+                        continue;
+                    }
+                    legalCount++;
+
+                    // 走完后对手是否被反将（闪将）
+                    const childInCheck = isInCheck(!isWhite,
+                        isWhite ? searchKingPos.black : searchKingPos.white);
+                    let eval;
+                    try {
+                        eval = quiescence(alpha, beta, !isMaximizing, ply + 1, childInCheck);
+                    } finally {
+                        undo();
+                    }
+
+                    if (isMaximizing) {
+                        if (eval > bestValue) bestValue = eval;
+                        if (eval > alpha) alpha = eval;
+                    } else {
+                        if (eval < bestValue) bestValue = eval;
+                        if (eval < beta) beta = eval;
+                    }
+                    if (beta <= alpha) break;
+                }
+
+                if (legalCount === 0) {
+                    return isMaximizing ? -(MATE - ply) : (MATE - ply);
+                }
+                return bestValue;
+            }
+
+            // stand-pat：当前走棋方至少可以保持现状，作为评估下界
+            const standPat = evaluateBoard(!isMaximizing, searchKingPos);
+            if (isMaximizing) {
+                if (standPat >= beta) return standPat;
+                if (standPat > alpha) alpha = standPat;
+            } else {
+                if (standPat <= alpha) return standPat;
+                if (standPat < beta) beta = standPat;
+            }
+            let bestValue = standPat;
+
+            // 只搜吃子走法（按被吃子价值 MVV 排序）
+            const captures = getAllCaptures(isWhite);
+            for (const move of captures) {
+                const victimValue = pieceValues[move.victim];
+                // delta 剪枝：即使完整吃回被吃子也追不回 alpha/beta，直接跳过
+                if (isMaximizing) {
+                    if (standPat + victimValue + DELTA_MARGIN <= alpha) continue;
+                } else if (standPat - victimValue - DELTA_MARGIN >= beta) {
+                    continue;
+                }
+
                 const undo = makeAIMoveInternal(move);
+                const childInCheck = isInCheck(!isWhite,
+                    isWhite ? searchKingPos.black : searchKingPos.white);
                 let eval;
                 try {
-                    eval = minimax(depth - 1, alpha, beta, true, ply + 1);
+                    eval = quiescence(alpha, beta, !isMaximizing, ply + 1, childInCheck);
                 } finally {
                     undo();
                 }
 
-                if (eval < bestValue) {
-                    bestValue = eval;
-                    bestMove = move;
+                if (isMaximizing) {
+                    if (eval > bestValue) bestValue = eval;
+                    if (eval > alpha) alpha = eval;
+                } else {
+                    if (eval < bestValue) bestValue = eval;
+                    if (eval < beta) beta = eval;
                 }
-                if (eval < beta) beta = eval;
-                if (beta <= alpha) {
-                    if (!move.captured) {
-                        recordKillerAndHistory(move, ply);
-                    }
-                    break; // Alpha剪枝
-                }
+                if (beta <= alpha) break;
             }
-        }
 
-        // 存置换表：根据相对 origAlpha/beta 判断 flag
-        let flag;
-        if (bestValue <= origAlpha) {
-            flag = TT_UPPER_BOUND; // fail-low
-        } else if (bestValue >= beta) {
-            flag = TT_LOWER_BOUND; // fail-high
-        } else {
-            flag = TT_EXACT;
+            return bestValue;
+        } finally {
+            searchPathKeys.pop();
         }
-        ttStore(currentZobristKey, depth, flag, bestValue, bestMove);
-
-        return bestValue;
     }
 
     // 记录杀手走法（同一 ply 最多两个，不重复）与历史得分
@@ -1422,12 +1567,11 @@ document.addEventListener('DOMContentLoaded', () => {
         historyTable[move.fromRow * 9 + move.fromCol][move.toRow * 9 + move.toCol] += ply * ply;
     }
 
-    // 获取所有可能的移动，并按启发式排序。
-    // heuristics（可选）: { ply, ttBestMove, killers, history, isMaximizing }
-    // 获取所有可能的移动，并按启发式排序。
-    // heuristics（可选）: { ply, ttBestMove, killers, history, isMaximizing }
-    // kingPosHint（可选）: 当前走棋方的王位置，搜索路径透传给 getPossibleMoves 跳过全盘找王
-    function getAllPossibleMoves(isWhite, heuristics, kingPosHint) {
+    // 生成某方全部伪合法走法并按启发式排序（搜索专用，P4）。
+    // 与旧版 getAllPossibleMoves 的区别：不做 wouldBeInCheck 过滤——
+    // 合法性验证改为在 minimax/quiescence 的 make 之后懒执行。
+    // heuristics 可为 null（静态搜索路径，此时只按 MVV-LVA 排序）。
+    function getAllPseudoLegalMoves(isWhite, heuristics) {
         const moves = [];
 
         for (let row = 0; row < 10; row++) {
@@ -1435,7 +1579,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const piece = gameState.board[row][col];
                 if (piece && piece[1] === isWhite) {
                     const type = piece[0];
-                    const pieceMoves = getPossibleMoves(row, col, type, isWhite, kingPosHint);
+                    const pieceMoves = getBasicMoves(row, col, piece);
 
                     for (const [toRow, toCol] of pieceMoves) {
                         moves.push({
@@ -1453,8 +1597,42 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // 为每个走法计算排序得分并写入 move.score
-        scoreMoves(moves, heuristics);
+        if (heuristics) {
+            scoreMoves(moves, heuristics);
+        }
         moves.sort((a, b) => b.score - a.score);
+        return moves;
+    }
+
+    // 生成某方全部吃子走法（静态搜索专用），按被吃子价值降序（MVV）
+    function getAllCaptures(isWhite) {
+        const moves = [];
+
+        for (let row = 0; row < 10; row++) {
+            for (let col = 0; col < 9; col++) {
+                const piece = gameState.board[row][col];
+                if (piece && piece[1] === isWhite) {
+                    const pieceMoves = getBasicMoves(row, col, piece);
+                    for (const [toRow, toCol] of pieceMoves) {
+                        const victim = gameState.board[toRow][toCol];
+                        if (victim) {
+                            moves.push({
+                                fromRow: row,
+                                fromCol: col,
+                                toRow: toRow,
+                                toCol: toCol,
+                                type: piece[0],
+                                captured: true,
+                                victim: victim[0],
+                                score: 0
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        moves.sort((a, b) => pieceValues[b.victim] - pieceValues[a.victim]);
         return moves;
     }
 
@@ -1508,25 +1686,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // 评估棋盘状态（确定性的——这是 TT 生效的前提，绝不能引入随机性）
     // sideToMove: 当前要走棋的一方（true=白方/人，false=黑方/AI），用于正确计算将军加成
     // kingPosHints（可选）: { white, black } 缓存王位置，搜索路径透传给 isInCheck 跳过全盘找王
+    //
+    // P4：子力+位置分改为增量维护的 searchScore（makeAIMoveInternal 维护），
+    // 评估降为 O(1)；活动性项已移除——静态搜索本身消除了吃子盲区，位置因素由
+    // 位置价值表承担，而活动性每次全盘走子统计的开销曾是静态搜索的主要瓶颈。
     function evaluateBoard(sideToMove, kingPosHints) {
-        let score = 0;
-
-        // 合并位置价值与子力评估为一次棋盘遍历（原先分两次遍历 90 格）
-        for (let row = 0; row < 10; row++) {
-            for (let col = 0; col < 9; col++) {
-                const piece = gameState.board[row][col];
-                if (piece) {
-                    const [type, isWhite] = piece;
-                    const positionValue = positionValues[type][isWhite ? (9 - row) : row][col];
-                    const material = pieceValues[type];
-                    // 正值=对黑方(AI)有利；白方取负
-                    score += isWhite ? -(positionValue + material) : (positionValue + material);
-                }
-            }
-        }
-
-        // 活动性评估（确定性的，每次都算，但权重低）
-        score += evaluateMobility() * 0.3;
+        let score = searchScore;
 
         // 检查对方是否被将军（加成）
         // score 为 AI（黑方）视角：白方被将军对 AI 有利(+20)，黑方被将军对 AI 不利(-20)
@@ -1551,51 +1716,71 @@ document.addEventListener('DOMContentLoaded', () => {
         //   - XOR 掉 to 格被吃棋子的键（若有）
         //   - XOR 上 to 格的走子键
         //   - XOR 轮次键（轮到对手）
-        let keyDelta = zobristTable[move.fromRow][move.fromCol][zobristPieceIndex(originalFromPiece)];
+        let pieceKeyDelta = zobristTable[move.fromRow][move.fromCol][zobristPieceIndex(originalFromPiece)];
         if (originalToPiece) {
-            keyDelta ^= zobristTable[move.toRow][move.toCol][zobristPieceIndex(originalToPiece)];
+            pieceKeyDelta ^= zobristTable[move.toRow][move.toCol][zobristPieceIndex(originalToPiece)];
         }
-        keyDelta ^= zobristTable[move.toRow][move.toCol][zobristPieceIndex(originalFromPiece)];
-        keyDelta ^= zobristBlackToMove;
+        pieceKeyDelta ^= zobristTable[move.toRow][move.toCol][zobristPieceIndex(originalFromPiece)];
+        // 完整键 = 棋子键 + 轮次键；board-only 键（不含轮次）用于重复局面检测
+        const keyDelta = pieceKeyDelta ^ zobristBlackToMove;
 
         // 增量维护王位置缓存：若走的是王，记住旧位置以便 undo 还原
         const isKingMove = originalFromPiece[0] === PIECE_TYPES.KING;
         const kingSideKey = originalFromPiece[1] ? 'white' : 'black';
         const oldKingPos = isKingMove ? { ...searchKingPos[kingSideKey] } : null;
 
+        // 增量维护静态分（子力+位置价值，正分=对黑方有利）：
+        //   - 移除 from 格走子的分值
+        //   - 移除 to 格被吃棋子的分值（若有）
+        //   - 加上走子落在 to 格后的分值
+        const fromType = originalFromPiece[0], fromWhite = originalFromPiece[1];
+        let scoreDelta = fromWhite
+            ? (pieceValues[fromType] + positionValues[fromType][9 - move.fromRow][move.fromCol])
+            : -(pieceValues[fromType] + positionValues[fromType][move.fromRow][move.fromCol]);
+        if (originalToPiece) {
+            const toType = originalToPiece[0], toWhite = originalToPiece[1];
+            scoreDelta += toWhite
+                ? (pieceValues[toType] + positionValues[toType][9 - move.toRow][move.toCol])
+                : -(pieceValues[toType] + positionValues[toType][move.toRow][move.toCol]);
+        }
+        scoreDelta += fromWhite
+            ? -(pieceValues[fromType] + positionValues[fromType][9 - move.toRow][move.toCol])
+            : (pieceValues[fromType] + positionValues[fromType][move.toRow][move.toCol]);
+
         // 执行移动
         gameState.board[move.fromRow][move.fromCol] = null;
         gameState.board[move.toRow][move.toCol] = originalFromPiece;
         currentZobristKey ^= keyDelta;
+        currentBoardKey ^= pieceKeyDelta;
+        searchScore += scoreDelta;
         if (isKingMove) {
             searchKingPos[kingSideKey] = { row: move.toRow, col: move.toCol };
         }
 
-        // 返回一个撤销函数：棋盘、键、王位置都通过闭包捕获的旧值还原
+        // 返回一个撤销函数：棋盘、键、王位置、静态分都通过闭包捕获的旧值还原
         return () => {
             // 恢复原始状态
             gameState.board[move.fromRow][move.fromCol] = originalFromPiece;
             gameState.board[move.toRow][move.toCol] = originalToPiece;
             currentZobristKey ^= keyDelta;
+            currentBoardKey ^= pieceKeyDelta;
+            searchScore -= scoreDelta;
             if (isKingMove) {
                 searchKingPos[kingSideKey] = oldKingPos;
             }
         };
     }
 
-    function findBestMove() {
-        const startTime = Date.now();
-        const maxTime = 5000; // 限制搜索时间为5秒
-        const maxDepth = gameState.aiDepths[gameState.aiDifficulty];
-
-        // 初始化搜索上下文：Zobrist 键全量重算（搜索期间有效，结束即弃用）、启发式表
-        currentZobristKey = computeZobristKey();
+    // 初始化搜索上下文（每次 findBestMove 开始时调用）：
+    // Zobrist 键（完整 + board-only）、置换表、启发式表、王位置缓存、对局历史重复键
+    function initSearchContext() {
+        currentZobristKey = computeZobristKey(); // 根节点为 AI（黑方）走棋
+        currentBoardKey = computeBoardKeyFromBoard(gameState.board);
+        searchScore = computeStaticScore(gameState.board);
         ttClear(); // 清掉上一回合的 TT 条目（跨回合不复用，但同一次 findBestMove 内的迭代加深复用）
         initHeuristics();
-        searchDeadline = startTime + maxTime;
-        searchTimedOut = false;
 
-        // 初始化王位置缓存（搜索开始时全盘找一次，后续增量维护）
+        // 初始化王位置缓存（搜索开始时全盘找一次，后续由 makeAIMoveInternal 增量维护）
         searchKingPos.white = null;
         searchKingPos.black = null;
         for (let row = 0; row < 10; row++) {
@@ -1608,26 +1793,53 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
+        // 对局历史中出现过的局面（board-only 口径），供搜索内重复判和检测
+        gameHistoryKeys = new Set();
+        for (const snap of gameState.boardHistory) {
+            gameHistoryKeys.add(computeBoardKeyFromBoard(snap));
+        }
+
+        searchPathKeys.length = 0;
+        searchStats = { nodes: 0, qnodes: 0, depth: 0, timeMs: 0, rootValue: 0 };
+    }
+
+    function findBestMove() {
+        const startTime = Date.now();
+        const maxTime = 5000; // 限制搜索时间为5秒
+        const maxDepth = gameState.aiDepths[gameState.aiDifficulty];
+
+        initSearchContext();
+        searchDeadline = startTime + maxTime;
+
         let depth = 1;
         let bestMove = null; // 上一次完整搜完的最佳走法（兜底）
+        let bestValue = 0;
 
         while (depth <= maxDepth) {
             let currentBestMove = null;
             let currentBestValue = -Infinity;
+            let anyLegal = false;
 
             try {
                 // 根节点走法也用启发式排序（TT bestMove 优先，便于深层搜索尽早命中）
-                // 根节点为 AI（黑方）走棋，传入黑方王位置 hint
-                const moves = getAllPossibleMoves(gameState.currentPlayer, {
+                // 根节点为 AI（黑方）走棋，走法为伪合法生成，懒合法性验证在循环内
+                const moves = getAllPseudoLegalMoves(gameState.currentPlayer, {
                     ply: 0,
                     ttBestMove: bestMove, // 以上一轮迭代的最佳走法作为 PV
                     killers: killerMoves[0],
                     history: historyTable,
                     isMaximizing: true
-                }, searchKingPos.black);
+                });
 
                 for (const move of moves) {
                     const undo = makeAIMoveInternal(move);
+                    // 根节点懒合法性检查
+                    if (isInCheck(gameState.currentPlayer,
+                            gameState.currentPlayer ? searchKingPos.white : searchKingPos.black)) {
+                        undo();
+                        continue;
+                    }
+                    anyLegal = true;
                     let value;
                     try {
                         // AI（黑方，最大化方）走完后轮到对手（白方，最小化方），故 isMaximizing=false
@@ -1642,19 +1854,32 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 }
 
+                if (!anyLegal) break; // 根节点无合法走法：已被将死/困毙
+
                 // 本层完整搜完，更新 bestMove（跨迭代复用 TT 与 PV，不清表）
                 bestMove = currentBestMove;
+                bestValue = currentBestValue;
+                searchStats.depth = depth;
                 depth++;
                 statusText.textContent = `AI思考中...深度 ${depth - 1}`;
             } catch (e) {
                 if (e === SEARCH_TIMEOUT) {
-                    // 超时打断：保留上一层的完整结果，不采用本层半截结果
+                    // 超时打断。本轮根走法按启发式排序（上一轮最佳置顶），
+                    // 只要已完整搜完至少一个根走法，其值就是真实的本层深度值，
+                    // 且后续走法只有搜出更高值才会替换——采用部分结果不劣于上一层完整结果。
+                    // 若一个根走法都没搜完（currentBestMove 为空），才保留上一层完整结果。
+                    if (currentBestMove !== null) {
+                        bestMove = currentBestMove;
+                        bestValue = currentBestValue;
+                    }
                     break;
                 }
                 throw e; // 真实异常重新抛出
             }
         }
 
+        searchStats.timeMs = Date.now() - startTime;
+        searchStats.rootValue = bestMove ? bestValue : 0;
         return bestMove;
     }
 
@@ -1693,5 +1918,32 @@ document.addEventListener('DOMContentLoaded', () => {
             gameState.aiThinking = false;
         }, thinkTime);
     }
+
+    // ============ 调试/测试钩子（P4） ============
+    // 暴露引擎内部给自动化测试（test-engine.js）与控制台调试使用，不影响正常游戏。
+    window.__bishopEngine = {
+        gameState,
+        PIECE_TYPES,
+        pieceValues,
+        MATE,
+        MATE_BOUND,
+        initialSetup,
+        getBasicMoves,
+        getPossibleMoves,
+        wouldBeInCheck,
+        isSquareAttacked,
+        isInCheck,
+        isPlayerMated,
+        getAllPseudoLegalMoves,
+        evaluateBoard,
+        isRepetitionDraw,
+        computeBoardKeyFromBoard,
+        computeStaticScore,
+        initSearchContext,
+        findBestMove,
+        makeAIMoveInternal,
+        getStats: () => searchStats,
+        getStaticScore: () => searchScore,
+    };
 
 });
